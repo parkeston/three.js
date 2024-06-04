@@ -28,7 +28,7 @@
 			let mesh;
 			const amount = 30;
 			const count = Math.pow( amount, 3 );
-			const dummy = new THREE.Object3D();
+			const dummyMatrix = new THREE.Matrix4();
 
 			init();
 
@@ -111,20 +111,24 @@
 					let i = 0;
 					const offset = ( amount - 1 ) / 2;
 
+					const position = new THREE.Vector3();
+					const rotation = new THREE.Quaternion();
+					const scale = new THREE.Vector3(1, 1, 1);
+					const euler = new THREE.Euler();
+
 					for ( let x = 0; x < amount; x ++ ) {
 
 						for ( let y = 0; y < amount; y ++ ) {
 
 							for ( let z = 0; z < amount; z ++ ) {
 
-								dummy.position.set( offset - x, offset - y, offset - z );
-								dummy.rotation.y = ( Math.sin( x / 4 + time ) + Math.sin( y / 4 + time ) + Math.sin( z / 4 + time ) );
-								dummy.rotation.z = dummy.rotation.y * 2;
+								let yRotation = Math.sin( x / 4 + time ) + Math.sin( y / 4 + time ) + Math.sin( z / 4 + time );
+								position.set(offset - x, offset - y, offset - z);
+								euler.set(0, yRotation, yRotation * 2);
+								rotation.setFromEuler(euler);
 
-								dummy.updateMatrix();
-
-								mesh.setMatrixAt( i ++, dummy.matrix );
-
+								dummyMatrix.compose(position, rotation, scale);
+								mesh.setMatrixAt(i ++, dummyMatrix);
 							}
 
 						}
