@@ -110,6 +110,7 @@
 
 					let i = 0;
 					const offset = ( amount - 1 ) / 2;
+					const meshCount = mesh.count;
 
 					const position = new THREE.Vector3();
 					const rotation = new THREE.Quaternion();
@@ -118,9 +119,24 @@
 
 					for ( let x = 0; x < amount; x ++ ) {
 
+						if(i >= meshCount)
+						{
+							break;
+						}
+
 						for ( let y = 0; y < amount; y ++ ) {
 
+							if(i >= meshCount)
+							{
+								break;
+							}
+
 							for ( let z = 0; z < amount; z ++ ) {
+
+								if(i >= meshCount)
+								{
+									break;
+								}
 
 								let yRotation = Math.sin( x / 4 + time ) + Math.sin( y / 4 + time ) + Math.sin( z / 4 + time );
 								position.set(offset - x, offset - y, offset - z);
