@@ -11,7 +11,8 @@
 			{
 				"imports": {
 					"three": "../build/three.module.js",
-					"three/addons/": "./jsm/"
+					"three/addons/": "./jsm/",
+					"three/nodes": "./jsm/nodes/Nodes.js"
 				}
 			}
 		</script>
@@ -19,20 +20,32 @@
 		<script type="module">
 
 			import * as THREE from 'three';
+			import { modelWorldMatrix, cameraViewMatrix, cameraProjectionMatrix, positionGeometry,  tslFn, instanceIndex, float, vec3, vec4, negate, storage, If, sin, cos, mat3, mat4, timerLocal} from 'three/nodes';
+
+			import WebGPU from 'three/addons/capabilities/WebGPU.js';
+			import WebGL from 'three/addons/capabilities/WebGL.js';
+			import WebGPURenderer from 'three/addons/renderers/webgpu/WebGPURenderer.js';
+			import StorageInstancedBufferAttribute from 'three/addons/renderers/common/StorageInstancedBufferAttribute.js';
 
 			import Stats from 'three/addons/libs/stats.module.js';
 			import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
 
 			let camera, scene, renderer, stats;
+			let mesh, computeInstances;
 
-			let mesh;
 			const amount = 30;
+			const offset = ( amount - 1 ) / 2;
 			const count = Math.pow( amount, 3 );
-			const dummyMatrix = new THREE.Matrix4();
 
 			init();
 
 			function init() {
+
+				if ( WebGPU.isAvailable() === false && WebGL.isWebGL2Available() === false ) {
+
+					document.body.appendChild( WebGPU.getErrorMessage() );
+					throw new Error( 'No WebGPU or WebGL2 support' );
+				}
 
 				camera = new THREE.PerspectiveCamera( 60, window.innerWidth / window.innerHeight, 0.1, 100 );
 				camera.position.set( amount * 0.9, amount * 0.9, amount * 0.9 );
@@ -40,6 +53,84 @@
 
 				scene = new THREE.Scene();
 
+				//create compute buffers
+
+				 const positionBuffer = storage( new StorageInstancedBufferAttribute(count, 3), 'vec3', count);
+				 const rotationBuffer = storage( new StorageInstancedBufferAttribute(count, 4), 'vec4', count);
+
+				//create compute functions
+				const computePerInstance = tslFn( () => {
+
+					const position = positionBuffer.element( instanceIndex );
+					const rotation = rotationBuffer.element(instanceIndex);
+
+					const x = instanceIndex.remainder(amount);
+					const y = (instanceIndex.div(amount)).remainder(amount);
+					const z = instanceIndex.div(float(amount).mul(amount));
+
+					const offset1 = float(offset);
+					const tempPos = vec3 (offset1.sub(x), offset1.sub(y), offset1.sub(z));
+					const time = timerLocal(1);
+
+					//local per object rotattion
+					const yLocalTheta = (sin(float(x).div(4).add(time)))
+						.add(sin(float(y).div(4).add(time)))
+						.add(sin(float(z).div(4).add(time)));
+						
+					const zLocalTheta = yLocalTheta.mul(2);
+					const cyL = cos(yLocalTheta);
+					const syL = sin(yLocalTheta);
+					const czL = cos(zLocalTheta);
+					const szL = sin(zLocalTheta);
+
+					//global cube rotation
+					const xTheta = sin(time.mul(0.25));
+					const yTheta = sin(time.mul(0.5));
+					const cx = cos(xTheta);
+					const sx = sin(xTheta);
+					const cy = cos( yTheta );
+					const sy = sin( yTheta );
+
+					const xyRotationMatrix = mat3(
+						cy, sy.mul(sx), sy.mul(cx),
+						0, cx, sx.negate(),
+						sy.negate(), cy.mul(sx), cy.mul(cx)
+					);
+
+					rotation.assign(vec4(cyL, syL, czL, szL)); //save local per object rotation to process per vertex
+					position.assign(tempPos.mul(xyRotationMatrix)); //write global reotation into position
+				} );
+
+				computeInstances = computePerInstance().compute(count);
+
+				const computePerVertex = tslFn( () => {
+
+					const instancePosition = positionBuffer.toAttribute();
+					const instanceRotation = rotationBuffer.toAttribute();
+
+					const cy = instanceRotation.x;
+					const sy = instanceRotation.y;
+					const cz = instanceRotation.z;
+					const sz = instanceRotation.w;
+
+					const yzLocalRotationMatrix = mat4(
+						cz.mul(cy), sz.negate(), cz.mul(sy), 0,
+						sz.mul(cy), cz, sz.mul(sy), 0,
+						sy.negate(), 0, cy, 0,
+						0, 0, 0, 1
+					);
+
+					const localMatrix = yzLocalRotationMatrix.mul(positionGeometry);
+					const worldMatrix = modelWorldMatrix.toVar();
+					worldMatrix[ 3 ][ 0 ] = instancePosition.x;
+					worldMatrix[ 3 ][ 1 ] = instancePosition.y;
+					worldMatrix[ 3 ][ 2 ] = instancePosition.z;
+
+					const modelViewMatrix = cameraViewMatrix.mul( worldMatrix );
+					return cameraProjectionMatrix.mul( modelViewMatrix ).mul( localMatrix );
+				} );
+
+				//load geopmetry mesh
 				const loader = new THREE.BufferGeometryLoader();
 				loader.load( 'models/json/suzanne_buffergeometry.json', function ( geometry ) {
 
@@ -47,23 +138,21 @@
 					geometry.scale( 0.5, 0.5, 0.5 );
 
 					const material = new THREE.MeshNormalMaterial();
-					// check overdraw
-					// let material = new THREE.MeshBasicMaterial( { color: 0xff0000, opacity: 0.1, transparent: true } );
+					material.vertexNode = computePerVertex();
 
-					mesh = new THREE.InstancedMesh( geometry, material, count );
-					mesh.instanceMatrix.setUsage( THREE.DynamicDrawUsage ); // will be updated every frame
+					mesh = new THREE.Mesh( geometry, material);
+					mesh.isInstancedMesh = true;
+					mesh.count = count;
+					mesh.castShadow = false;
 					scene.add( mesh );
-
-					//
 
 					const gui = new GUI();
 					gui.add( mesh, 'count', 0, count );
-
 				} );
 
 				//
 
-				renderer = new THREE.WebGLRenderer( { antialias: true } );
+				renderer = new WebGPURenderer( { antialias: true } );
 				renderer.setPixelRatio( window.devicePixelRatio );
 				renderer.setSize( window.innerWidth, window.innerHeight );
 				renderer.setAnimationLoop( animate );
@@ -73,90 +162,81 @@
 
 				stats = new Stats();
 				document.body.appendChild( stats.dom );
-
-				//
-
 				window.addEventListener( 'resize', onWindowResize );
-
 			}
 
 			function onWindowResize() {
-
 				camera.aspect = window.innerWidth / window.innerHeight;
 				camera.updateProjectionMatrix();
-
 				renderer.setSize( window.innerWidth, window.innerHeight );
-
 			}
 
 			//
 
 			function animate() {
-
-				render();
-
 				stats.update();
-
+				renderer.computeAsync( computeInstances );
+				renderer.renderAsync( scene, camera );
 			}
 
-			function render() {
+			// function render() {
 
-				if ( mesh ) {
+			// 	if ( mesh ) {
 
-					const time = Date.now() * 0.001;
+			// 		time = Date.now() * 0.001;
 
-					mesh.rotation.x = Math.sin( time / 4 );
-					mesh.rotation.y = Math.sin( time / 2 );
+			// 		mesh.rotation.x = Math.sin( time / 4 );
+			// 		mesh.rotation.y = Math.sin( time / 2 );
 
-					let i = 0;
-					const offset = ( amount - 1 ) / 2;
-					const meshCount = mesh.count;
+			// 		let i = 0;
+			// 		const offset = ( amount - 1 ) / 2;
+			// 		const meshCount = mesh.count;
 
-					const position = new THREE.Vector3();
-					const rotation = new THREE.Quaternion();
-					const scale = new THREE.Vector3(1, 1, 1);
-					const euler = new THREE.Euler();
+			// 		const position = new THREE.Vector3();
+			// 		const rotation = new THREE.Quaternion();
+			// 		const scale = new THREE.Vector3(1, 1, 1);
+			// 		const euler = new THREE.Euler();
 
-					for ( let x = 0; x < amount; x ++ ) {
+			// 		for ( let x = 0; x < amount; x ++ ) {
 
-						if(i >= meshCount)
-						{
-							break;
-						}
+			// 			if(i >= meshCount)
+			// 			{
+			// 				break;
+			// 			}
 
-						for ( let y = 0; y < amount; y ++ ) {
+			// 			for ( let y = 0; y < amount; y ++ ) {
 
-							if(i >= meshCount)
-							{
-								break;
-							}
+			// 				if(i >= meshCount)
+			// 				{
+			// 					break;
+			// 				}
 
-							for ( let z = 0; z < amount; z ++ ) {
+			// 				for ( let z = 0; z < amount; z ++ ) {
 
-								if(i >= meshCount)
-								{
-									break;
-								}
+			// 					if(i >= meshCount)
+			// 					{
+			// 						break;
+			// 					}
 
-								let yRotation = Math.sin( x / 4 + time ) + Math.sin( y / 4 + time ) + Math.sin( z / 4 + time );
-								position.set(offset - x, offset - y, offset - z);
-								euler.set(0, yRotation, yRotation * 2);
-								rotation.setFromEuler(euler);
+			// 					let yRotation = Math.sin( x / 4 + time ) + Math.sin( y / 4 + time ) + Math.sin( z / 4 + time );
+			// 					position.set(offset - x, offset - y, offset - z);
+			// 					euler.set(0, yRotation, yRotation * 2);
+			// 					rotation.setFromEuler(euler);
 
-								dummyMatrix.compose(position, rotation, scale);
-								mesh.setMatrixAt(i ++, dummyMatrix);
-							}
+			// 					dummyMatrix.compose(position, rotation, scale);
+			// 					mesh.setMatrixAt(i ++, dummyMatrix);
+			// 				}
 
-						}
+			// 			}
 
-					}
+			// 		}
 
-					mesh.instanceMatrix.needsUpdate = true;
-				}
+			// 		mesh.instanceMatrix.needsUpdate = true;
+			// 	}
 
-				renderer.render( scene, camera );
+			// 	renderer.render( scene, camera );
 
-			}
+			// }
 
 		</script>
 
